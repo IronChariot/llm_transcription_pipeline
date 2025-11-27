@@ -25,7 +25,7 @@ A robust audio transcription and diarization pipeline designed for long audio an
 
 1.  Clone the repository:
     ```bash
-    git clone <repository-url>
+    git clone https://github.com/IronChariot/llm_transcription_pipeline.git
     cd transcription_pipeline
     ```
 
