@@ -379,11 +379,20 @@ def stitch_transcripts(segments: List[TranscriptSegment]) -> str:
             cut2 = split2 + len2
             
             # Stitch: take text1 up to cut point, then text2 from cut point
-            # Use lstrip() on the second part to avoid double newlines if the match included the end of a line
-            # But be careful about blank lines. 
-            # The logic below adds '\n\n', so we want to ensure we don't have excessive spacing.
+            # Strip whitespace from both sides of the join point
+            first_part = result[:cut1].rstrip()
+            remaining_text = mapped_text[cut2:].lstrip()
             
-            result = result[:cut1].rstrip() + '\n\n' + mapped_text[cut2:].lstrip()
+            # Check if the remaining text starts with a speaker label (bold markdown format)
+            # Pattern matches **Speaker N:** or **Person N:** etc.
+            # Only add paragraph break if a new speaker turn begins
+            speaker_label_pattern = re.compile(r'^\*\*[A-Za-z][A-Za-z0-9\s]*:\*\*')
+            if speaker_label_pattern.match(remaining_text):
+                # New speaker turn, add paragraph break
+                result = first_part + '\n\n' + remaining_text
+            else:
+                # Continuing same speaker or mid-sentence, just add a space
+                result = first_part + ' ' + remaining_text
         else:
             print(f"    No good alignment found, appending with separator")
             # No good alignment found - just append with a separator
