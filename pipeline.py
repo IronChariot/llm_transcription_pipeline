@@ -14,8 +14,11 @@ from speaker_reconciler import (
     extract_transcript_and_metadata,
     reconcile_speakers,
     apply_speaker_mapping,
+    build_speaker_debug_summary,
     SpeakerMetadata,
+    ReconciliationResult,
 )
+import json
 from providers import TranscriptionProvider, GeminiProvider
 from config import TRANSCRIPTION_PROMPT, OUTPUT_DIR
 
@@ -47,6 +50,7 @@ class TranscriptionPipeline:
         prompt: Optional[str] = None,
         output_dir: Optional[str] = None,
         keep_chunks: bool = False,
+        logs_dir: str = "process_logs",
     ):
         """
         Initialize the transcription pipeline.
@@ -56,11 +60,14 @@ class TranscriptionPipeline:
             prompt: Custom transcription prompt. Defaults to TRANSCRIPTION_PROMPT.
             output_dir: Directory for output files. Defaults to OUTPUT_DIR.
             keep_chunks: If True, don't delete temporary chunk files.
+            logs_dir: Directory for process logs. Defaults to "process_logs".
         """
         self.provider = provider or GeminiProvider()
         self.prompt = prompt or TRANSCRIPTION_PROMPT
         self.output_dir = output_dir or OUTPUT_DIR
         self.keep_chunks = keep_chunks
+        self.logs_dir = logs_dir
+        self.current_log_dir: Optional[str] = None
         
         # Ensure output directory exists
         os.makedirs(self.output_dir, exist_ok=True)
@@ -91,6 +98,9 @@ class TranscriptionPipeline:
         print(f"Provider: {self.provider.name}")
         print(f"{'='*60}\n")
         
+        # Create log directory for this run
+        self._create_log_directory(input_path)
+        
         # Step 0: Extract audio from video if needed
         if is_video_file(input_path):
             print("Step 0: Extracting audio from video...")
@@ -112,7 +122,10 @@ class TranscriptionPipeline:
         
         # Step 2: Transcribe each chunk
         print(f"\nStep 2: Transcribing {len(chunks)} chunks...")
-        raw_transcripts, all_speaker_metadata = self._transcribe_chunks_with_metadata(chunks)
+        raw_transcripts, all_speaker_metadata, raw_responses = self._transcribe_chunks_with_metadata(chunks)
+        
+        # Save chunk transcripts and metadata to logs
+        self._save_chunk_logs(raw_transcripts, all_speaker_metadata, raw_responses)
         
         # Step 3: Reconcile speakers across chunks
         print(f"\nStep 3: Reconciling speakers across chunks...")
@@ -169,9 +182,101 @@ class TranscriptionPipeline:
             provider_name=self.provider.name,
         )
     
+    def _create_log_directory(self, input_path: str) -> None:
+        """Create a log directory for this transcription run."""
+        base_name = os.path.splitext(os.path.basename(input_path))[0]
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        log_folder_name = f"{base_name}_{timestamp}"
+        
+        self.current_log_dir = os.path.join(self.logs_dir, log_folder_name)
+        os.makedirs(self.current_log_dir, exist_ok=True)
+        print(f"Process logs will be saved to: {self.current_log_dir}")
+    
+    def _save_chunk_logs(
+        self,
+        transcripts: List[str],
+        all_metadata: Dict[int, List[SpeakerMetadata]],
+        raw_responses: List[str],
+    ) -> None:
+        """Save chunk transcripts and speaker metadata to log directory."""
+        if not self.current_log_dir:
+            return
+        
+        chunks_dir = os.path.join(self.current_log_dir, "chunks")
+        os.makedirs(chunks_dir, exist_ok=True)
+        
+        # Save each chunk's data
+        for i, (transcript, raw_response) in enumerate(zip(transcripts, raw_responses)):
+            # Save raw LLM response
+            raw_path = os.path.join(chunks_dir, f"chunk_{i:03d}_raw_response.txt")
+            with open(raw_path, 'w', encoding='utf-8') as f:
+                f.write(raw_response)
+            
+            # Save extracted transcript
+            transcript_path = os.path.join(chunks_dir, f"chunk_{i:03d}_transcript.txt")
+            with open(transcript_path, 'w', encoding='utf-8') as f:
+                f.write(transcript)
+            
+            # Save speaker metadata if present
+            if i in all_metadata:
+                metadata_path = os.path.join(chunks_dir, f"chunk_{i:03d}_speakers.json")
+                metadata_json = [
+                    {
+                        "label": s.label,
+                        "voice_description": s.voice_description,
+                        "role_estimation": s.role_estimation,
+                    }
+                    for s in all_metadata[i]
+                ]
+                with open(metadata_path, 'w', encoding='utf-8') as f:
+                    json.dump(metadata_json, f, indent=2)
+        
+        print(f"  Saved {len(transcripts)} chunk logs to {chunks_dir}")
+    
+    def _save_reconciliation_logs(
+        self,
+        result: ReconciliationResult,
+        all_metadata: Dict[int, List[SpeakerMetadata]],
+    ) -> None:
+        """Save reconciliation data to log directory."""
+        if not self.current_log_dir:
+            return
+        
+        # Save the input JSON sent to reconciliation
+        input_path = os.path.join(self.current_log_dir, "reconciliation_input.json")
+        with open(input_path, 'w', encoding='utf-8') as f:
+            f.write(result.input_json)
+        
+        # Save the raw LLM response
+        response_path = os.path.join(self.current_log_dir, "reconciliation_response.txt")
+        with open(response_path, 'w', encoding='utf-8') as f:
+            f.write(result.raw_response)
+        
+        # Save the parsed mappings
+        mappings_path = os.path.join(self.current_log_dir, "reconciliation_mappings.json")
+        mappings_json = [
+            {
+                "master_label": m.master_label,
+                "voice_description": m.voice_description,
+                "role_estimation": m.role_estimation,
+                "chunk_labels": m.chunk_labels,
+            }
+            for m in result.mappings
+        ]
+        with open(mappings_path, 'w', encoding='utf-8') as f:
+            json.dump(mappings_json, f, indent=2)
+        
+        # Build and save the debug summary
+        debug_summary = build_speaker_debug_summary(result.mappings, all_metadata)
+        summary_path = os.path.join(self.current_log_dir, "speaker_debug_summary.json")
+        with open(summary_path, 'w', encoding='utf-8') as f:
+            json.dump(debug_summary, f, indent=2)
+        
+        print(f"  Saved reconciliation logs to {self.current_log_dir}")
+    
     def _transcribe_chunks_with_metadata(
         self, chunks: List[AudioChunk]
-    ) -> tuple[List[str], Dict[int, List[SpeakerMetadata]]]:
+    ) -> tuple[List[str], Dict[int, List[SpeakerMetadata]], List[str]]:
         """
         Transcribe all audio chunks and extract speaker metadata.
         
@@ -179,10 +284,11 @@ class TranscriptionPipeline:
             chunks: List of AudioChunk objects
             
         Returns:
-            Tuple of (list of transcript texts, dict of chunk_index to speaker metadata)
+            Tuple of (list of transcript texts, dict of chunk_index to speaker metadata, list of raw responses)
         """
         transcripts = []
         all_metadata: Dict[int, List[SpeakerMetadata]] = {}
+        raw_responses = []
         
         for i, chunk in enumerate(chunks):
             print(f"\n  Transcribing chunk {i + 1}/{len(chunks)}...")
@@ -191,6 +297,7 @@ class TranscriptionPipeline:
             
             try:
                 raw_response = self.provider.transcribe(chunk.file_path, self.prompt)
+                raw_responses.append(raw_response)
                 
                 # Extract transcript and speaker metadata
                 transcript, speaker_metadata = extract_transcript_and_metadata(
@@ -207,8 +314,9 @@ class TranscriptionPipeline:
             except Exception as e:
                 print(f"    ERROR: {e}")
                 transcripts.append(f"[Transcription failed for chunk {chunk.index}: {e}]")
+                raw_responses.append(f"[Error: {e}]")
         
-        return transcripts, all_metadata
+        return transcripts, all_metadata, raw_responses
     
     def _reconcile_and_apply_speakers(
         self,
@@ -231,14 +339,17 @@ class TranscriptionPipeline:
         
         try:
             # Get the speaker mapping from LLM
-            replacement_map = reconcile_speakers(all_metadata, self.provider)
+            result = reconcile_speakers(all_metadata, self.provider)
+            
+            # Save reconciliation logs
+            self._save_reconciliation_logs(result, all_metadata)
             
             # Apply mapping to each transcript
             reconciled = []
             for i, transcript in enumerate(transcripts):
-                if i in replacement_map:
+                if i in result.replacement_map:
                     mapped_transcript = apply_speaker_mapping(
-                        transcript, replacement_map[i]
+                        transcript, result.replacement_map[i]
                     )
                     reconciled.append(mapped_transcript)
                 else:

@@ -253,10 +253,19 @@ def validate_mapping_coverage(
     return len(missing) == 0, missing
 
 
+@dataclass
+class ReconciliationResult:
+    """Result of speaker reconciliation including debug data."""
+    replacement_map: Dict[int, Dict[str, str]]
+    mappings: List[PersonMapping]
+    raw_response: str
+    input_json: str
+
+
 def reconcile_speakers(
     all_chunk_metadata: Dict[int, List[SpeakerMetadata]],
     provider: Any,  # TranscriptionProvider
-) -> Dict[int, Dict[str, str]]:
+) -> ReconciliationResult:
     """
     Reconcile speakers across all chunks using an LLM call.
     
@@ -265,22 +274,41 @@ def reconcile_speakers(
         provider: The transcription provider to use for the LLM call
         
     Returns:
-        Dict[chunk_index, Dict[old_label, new_label]] for label replacement
+        ReconciliationResult with replacement map and debug data
     """
     if not all_chunk_metadata:
-        return {}
+        return ReconciliationResult(
+            replacement_map={},
+            mappings=[],
+            raw_response="",
+            input_json="",
+        )
     
     # Check if there's only one chunk - no reconciliation needed
     if len(all_chunk_metadata) == 1:
         chunk_idx = list(all_chunk_metadata.keys())[0]
         speakers = all_chunk_metadata[chunk_idx]
         # Just map Speaker N -> Person N
-        return {
-            chunk_idx: {
-                s.label: s.label.replace("Speaker", "Person")
-                for s in speakers
-            }
-        }
+        mappings = [
+            PersonMapping(
+                master_label=s.label.replace("Speaker", "Person"),
+                voice_description=s.voice_description,
+                role_estimation=s.role_estimation,
+                chunk_labels=[{"chunk": chunk_idx + 1, "label": s.label}]
+            )
+            for s in speakers
+        ]
+        return ReconciliationResult(
+            replacement_map={
+                chunk_idx: {
+                    s.label: s.label.replace("Speaker", "Person")
+                    for s in speakers
+                }
+            },
+            mappings=mappings,
+            raw_response="Single chunk - no LLM call needed",
+            input_json=build_reconciliation_input(all_chunk_metadata),
+        )
     
     print("\n  Building speaker reconciliation request...")
     
@@ -305,10 +333,12 @@ def reconcile_speakers(
     if not response.text:
         raise ValueError("Empty response from reconciliation LLM call")
     
+    raw_response = response.text
+    
     print("  Parsing reconciliation response...")
     
     # Parse the response
-    mappings = parse_reconciliation_response(response.text)
+    mappings = parse_reconciliation_response(raw_response)
     
     # Validate coverage
     is_valid, missing = validate_mapping_coverage(mappings, all_chunk_metadata)
@@ -333,7 +363,59 @@ def reconcile_speakers(
     
     print(f"  Identified {len(mappings)} unique speakers across {len(all_chunk_metadata)} chunks")
     
-    return replacement_map
+    return ReconciliationResult(
+        replacement_map=replacement_map,
+        mappings=mappings,
+        raw_response=raw_response,
+        input_json=chunk_metadata_json,
+    )
+
+
+def build_speaker_debug_summary(
+    mappings: List[PersonMapping],
+    all_chunk_metadata: Dict[int, List[SpeakerMetadata]]
+) -> Dict[str, Any]:
+    """
+    Build a debug summary showing all voice descriptions and role estimations
+    for each master label, grouped by which chunk they came from.
+    
+    Args:
+        mappings: List of PersonMapping from reconciliation
+        all_chunk_metadata: Original speaker metadata from all chunks
+        
+    Returns:
+        Dict structure for JSON output
+    """
+    summary = {}
+    
+    for person in mappings:
+        person_data = {
+            "master_label": person.master_label,
+            "final_voice_description": person.voice_description,
+            "final_role_estimation": person.role_estimation,
+            "chunk_descriptions": []
+        }
+        
+        # Find all the original descriptions from each chunk
+        for chunk_label in person.chunk_labels:
+            chunk_idx = chunk_label["chunk"] - 1  # 0-indexed
+            label = chunk_label["label"]
+            
+            # Find the original metadata for this speaker in this chunk
+            if chunk_idx in all_chunk_metadata:
+                for speaker in all_chunk_metadata[chunk_idx]:
+                    if speaker.label == label:
+                        person_data["chunk_descriptions"].append({
+                            "chunk": chunk_label["chunk"],
+                            "original_label": label,
+                            "voice_description": speaker.voice_description,
+                            "role_estimation": speaker.role_estimation,
+                        })
+                        break
+        
+        summary[person.master_label] = person_data
+    
+    return summary
 
 
 if __name__ == "__main__":
