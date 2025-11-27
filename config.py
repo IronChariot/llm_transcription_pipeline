@@ -112,10 +112,11 @@ Important:
 - Use "Person 1", "Person 2", etc. as master labels
 - Include all chunks where each person speaks in their chunk_labels array
 - If uncertain whether two speakers are the same person, keep them separate
-- Be wary of French accents in particular - the transcript includes someone whose accent is sometimes identified as French, but is often simply identified as British (RP or Standard Southern), so keep that in mind.
+- Be wary of French accents in particular - the transcript includes someone whose accent is sometimes identified as French, but the accent is often simply identified as British (RP or Standard Southern), so keep that in mind.
 
 Output only the JSON block, no other text."""
 
 # Model settings
 GEMINI_MODEL = "gemini-3-pro-preview"
+# GEMINI_MODEL = "gemini-2.5-pro"
 

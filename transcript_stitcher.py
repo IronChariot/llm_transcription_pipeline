@@ -102,16 +102,33 @@ def extract_lines_with_speakers(text: str) -> List[Tuple[str, str]]:
     return lines
 
 
+def get_word_indices(text: str) -> List[Tuple[int, int]]:
+    """
+    Returns a list of (start, end) character indices for each word in text.
+    A word is defined as a sequence of non-whitespace characters.
+    
+    Args:
+        text: Input string
+        
+    Returns:
+        List of (start_index, end_index) tuples. 
+        end_index is exclusive (like python slice).
+    """
+    indices = []
+    for match in re.finditer(r'\S+', text):
+        indices.append(match.span())
+    return indices
+
+
 def find_overlap_alignment(
     text1: str,
     text2: str,
     overlap_ratio: float = 0.15,
     min_match_score: float = 60.0
-) -> Tuple[int, int, float]:
+) -> Tuple[int, int, int, int, float]:
     """
     Find the best alignment point between the end of text1 and start of text2.
-    
-    Uses fuzzy matching to handle slight transcription differences.
+    Prioritizes matches closer to the end of text1.
     
     Args:
         text1: First transcript (look at the end)
@@ -120,38 +137,50 @@ def find_overlap_alignment(
         min_match_score: Minimum fuzzy match score to consider a match
         
     Returns:
-        Tuple of (split_point_in_text1, split_point_in_text2, match_score)
-        Returns (-1, -1, 0) if no good match found
+        Tuple of (start_in_text1, start_in_text2, length_in_text1, length_in_text2, match_score)
+        Returns (-1, -1, 0, 0, 0.0) if no good match found
     """
-    # Get words from both texts
-    words1 = text1.split()
-    words2 = text2.split()
+    # Get words and their character positions
+    # Use regex to split to match get_word_indices logic
+    words1 = re.findall(r'\S+', text1)
+    words2 = re.findall(r'\S+', text2)
+    
+    # Get exact character indices
+    word_indices1 = get_word_indices(text1)
+    word_indices2 = get_word_indices(text2)
     
     if not words1 or not words2:
-        return -1, -1, 0.0
+        return -1, -1, 0, 0, 0.0
     
     # Estimate overlap region in words
     estimated_overlap_words = int(len(words2) * overlap_ratio)
     search_window = max(estimated_overlap_words * 2, 50)  # Search window
     
     # Look at the end of text1
-    end_words1 = words1[-search_window:] if len(words1) > search_window else words1
+    # Determine start index for search window in text1
+    start_idx1 = max(0, len(words1) - search_window)
+    end_words1 = words1[start_idx1:]
+    
     # Look at the start of text2
-    start_words2 = words2[:search_window] if len(words2) > search_window else words2
+    end_idx2 = min(len(words2), search_window)
+    start_words2 = words2[:end_idx2]
     
     best_score = 0.0
-    best_i = -1
-    best_j = -1
+    best_i = -1 # Index within end_words1
+    best_j = -1 # Index within start_words2
+    best_len_words = 0 # Length in words
     
-    # Sliding window comparison
     # Try different phrase lengths for matching
-    for phrase_len in [10, 15, 20, 8, 5]:
+    # Prefer longer matches first
+    for phrase_len in [20, 15, 10, 8, 5]:
         if phrase_len > len(end_words1) or phrase_len > len(start_words2):
             continue
             
-        for i in range(len(end_words1) - phrase_len + 1):
+        # Iterate backwards through text1 to find the latest possible match
+        for i in range(len(end_words1) - phrase_len, -1, -1):
             phrase1 = ' '.join(end_words1[i:i + phrase_len])
             
+            # For text2, we search from the beginning
             for j in range(len(start_words2) - phrase_len + 1):
                 phrase2 = ' '.join(start_words2[j:j + phrase_len])
                 
@@ -160,18 +189,36 @@ def find_overlap_alignment(
                 
                 if score > best_score and score >= min_match_score:
                     best_score = score
-                    # Calculate actual positions in full texts
-                    words1_offset = len(words1) - len(end_words1)
-                    best_i = words1_offset + i
+                    best_i = i
                     best_j = j
+                    best_len_words = phrase_len
+        
+        if best_score > 90:
+            break
     
     if best_score >= min_match_score:
-        # Convert word positions back to character positions
-        char_pos1 = len(' '.join(words1[:best_i]))
-        char_pos2 = len(' '.join(words2[:best_j]))
-        return char_pos1, char_pos2, best_score
+        # Map back to absolute word indices
+        abs_word_idx1_start = start_idx1 + best_i
+        abs_word_idx1_end = abs_word_idx1_start + best_len_words - 1 # inclusive
+        
+        abs_word_idx2_start = best_j
+        abs_word_idx2_end = abs_word_idx2_start + best_len_words - 1 # inclusive
+        
+        # Map to character indices
+        # Start char of first word
+        char_pos1_start = word_indices1[abs_word_idx1_start][0]
+        # End char of last word
+        char_pos1_end = word_indices1[abs_word_idx1_end][1]
+        
+        char_pos2_start = word_indices2[abs_word_idx2_start][0]
+        char_pos2_end = word_indices2[abs_word_idx2_end][1]
+        
+        len1 = char_pos1_end - char_pos1_start
+        len2 = char_pos2_end - char_pos2_start
+        
+        return char_pos1_start, char_pos2_start, len1, len2, best_score
     
-    return -1, -1, 0.0
+    return -1, -1, 0, 0, 0.0
 
 
 def build_speaker_mapping(
@@ -182,8 +229,6 @@ def build_speaker_mapping(
 ) -> Dict[str, str]:
     """
     Build a mapping from speakers in text2 to speakers in text1.
-    
-    Uses the overlapping content to identify which speakers correspond.
     
     Args:
         lines1: Speaker lines from first transcript
@@ -294,7 +339,8 @@ def stitch_transcripts(segments: List[TranscriptSegment]) -> str:
         print(f"  Stitching chunk {i-1} with chunk {i}...")
         
         # Find alignment in overlap region
-        split1, split2, score = find_overlap_alignment(
+        # We get the START positions and LENGTHS of the matching phrase
+        split1, split2, len1, len2, score = find_overlap_alignment(
             result,
             curr_segment.text,
             overlap_ratio=0.10
@@ -303,9 +349,15 @@ def stitch_transcripts(segments: List[TranscriptSegment]) -> str:
         if split1 >= 0 and split2 >= 0:
             print(f"    Found alignment with score {score:.1f}")
             
-            # Extract overlap regions for speaker mapping
-            overlap1 = result[split1:]
-            overlap2 = curr_segment.text[:split2 + len(result) - split1]
+            # We stitch AFTER the matching phrase.
+            # This ensures we keep the version of the overlapping text from the first chunk
+            # (which is the end of that chunk) rather than the start of the second chunk
+            # (which might be cut off mid-sentence).
+            
+            # Extract overlapping content for speaker mapping
+            # We use the matching phrase itself as the core overlap reference
+            overlap1 = result[split1 : split1 + len1]
+            overlap2 = curr_segment.text[split2 : split2 + len2]
             
             # Build speaker mapping
             lines1 = extract_lines_with_speakers(result)
@@ -322,8 +374,16 @@ def stitch_transcripts(segments: List[TranscriptSegment]) -> str:
             # Apply mapping to current segment
             mapped_text = apply_speaker_mapping(curr_segment.text, speaker_mapping)
             
-            # Stitch: take text1 up to split point, then text2 from split point
-            result = result[:split1].rstrip() + '\n\n' + mapped_text[split2:].lstrip()
+            # Calculate cut points - AFTER the match
+            cut1 = split1 + len1
+            cut2 = split2 + len2
+            
+            # Stitch: take text1 up to cut point, then text2 from cut point
+            # Use lstrip() on the second part to avoid double newlines if the match included the end of a line
+            # But be careful about blank lines. 
+            # The logic below adds '\n\n', so we want to ensure we don't have excessive spacing.
+            
+            result = result[:cut1].rstrip() + '\n\n' + mapped_text[cut2:].lstrip()
         else:
             print(f"    No good alignment found, appending with separator")
             # No good alignment found - just append with a separator
@@ -356,4 +416,3 @@ Speaker B: The budget review is next on the agenda."""
     result = stitch_transcripts(segments)
     print("--- Stitched Result ---")
     print(result)
-
