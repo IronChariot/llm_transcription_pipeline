@@ -4,12 +4,18 @@ Main pipeline orchestrator for audio transcription.
 import os
 import time
 from dataclasses import dataclass
-from typing import Optional, List
+from typing import Optional, List, Dict
 from datetime import datetime
 
 from audio_chunker import chunk_audio, cleanup_chunks, AudioChunk
 from audio_extractor import ensure_audio_file, is_video_file
 from transcript_stitcher import stitch_transcripts, TranscriptSegment
+from speaker_reconciler import (
+    extract_transcript_and_metadata,
+    reconcile_speakers,
+    apply_speaker_mapping,
+    SpeakerMetadata,
+)
 from providers import TranscriptionProvider, GeminiProvider
 from config import TRANSCRIPTION_PROMPT, OUTPUT_DIR
 
@@ -106,14 +112,30 @@ class TranscriptionPipeline:
         
         # Step 2: Transcribe each chunk
         print(f"\nStep 2: Transcribing {len(chunks)} chunks...")
-        segments = self._transcribe_chunks(chunks)
+        raw_transcripts, all_speaker_metadata = self._transcribe_chunks_with_metadata(chunks)
         
-        # Step 3: Stitch transcripts together
-        print(f"\nStep 3: Stitching transcripts...")
+        # Step 3: Reconcile speakers across chunks
+        print(f"\nStep 3: Reconciling speakers across chunks...")
+        reconciled_transcripts = self._reconcile_and_apply_speakers(
+            raw_transcripts, all_speaker_metadata
+        )
+        
+        # Step 4: Build segments and stitch transcripts together
+        print(f"\nStep 4: Stitching transcripts...")
+        segments = [
+            TranscriptSegment(
+                chunk_index=i,
+                text=transcript,
+                overlap_duration_ms=chunks[i].overlap_duration_ms,
+                has_overlap_before=chunks[i].has_overlap_before,
+                has_overlap_after=chunks[i].has_overlap_after,
+            )
+            for i, transcript in enumerate(reconciled_transcripts)
+        ]
         final_transcript = stitch_transcripts(segments)
         
-        # Step 4: Save output
-        print(f"\nStep 4: Saving output...")
+        # Step 5: Save output
+        print(f"\nStep 5: Saving output...")
         output_path = self._save_transcript(original_input, final_transcript, output_filename)
         
         # Cleanup
@@ -147,17 +169,20 @@ class TranscriptionPipeline:
             provider_name=self.provider.name,
         )
     
-    def _transcribe_chunks(self, chunks: List[AudioChunk]) -> List[TranscriptSegment]:
+    def _transcribe_chunks_with_metadata(
+        self, chunks: List[AudioChunk]
+    ) -> tuple[List[str], Dict[int, List[SpeakerMetadata]]]:
         """
-        Transcribe all audio chunks.
+        Transcribe all audio chunks and extract speaker metadata.
         
         Args:
             chunks: List of AudioChunk objects
             
         Returns:
-            List of TranscriptSegment objects
+            Tuple of (list of transcript texts, dict of chunk_index to speaker metadata)
         """
-        segments = []
+        transcripts = []
+        all_metadata: Dict[int, List[SpeakerMetadata]] = {}
         
         for i, chunk in enumerate(chunks):
             print(f"\n  Transcribing chunk {i + 1}/{len(chunks)}...")
@@ -165,31 +190,66 @@ class TranscriptionPipeline:
             print(f"    Duration: {chunk.duration_ms/1000:.1f}s")
             
             try:
-                transcript = self.provider.transcribe(chunk.file_path, self.prompt)
+                raw_response = self.provider.transcribe(chunk.file_path, self.prompt)
                 
-                segment = TranscriptSegment(
-                    chunk_index=chunk.index,
-                    text=transcript,
-                    overlap_duration_ms=chunk.overlap_duration_ms,
-                    has_overlap_before=chunk.has_overlap_before,
-                    has_overlap_after=chunk.has_overlap_after,
+                # Extract transcript and speaker metadata
+                transcript, speaker_metadata = extract_transcript_and_metadata(
+                    raw_response, chunk.index
                 )
-                segments.append(segment)
+                
+                transcripts.append(transcript)
+                if speaker_metadata:
+                    all_metadata[chunk.index] = speaker_metadata
+                    print(f"    Found {len(speaker_metadata)} speakers")
                 
                 print(f"    Transcribed {len(transcript)} characters")
                 
             except Exception as e:
                 print(f"    ERROR: {e}")
-                # Add empty segment to maintain order
-                segments.append(TranscriptSegment(
-                    chunk_index=chunk.index,
-                    text=f"[Transcription failed for chunk {chunk.index}: {e}]",
-                    overlap_duration_ms=chunk.overlap_duration_ms,
-                    has_overlap_before=chunk.has_overlap_before,
-                    has_overlap_after=chunk.has_overlap_after,
-                ))
+                transcripts.append(f"[Transcription failed for chunk {chunk.index}: {e}]")
         
-        return segments
+        return transcripts, all_metadata
+    
+    def _reconcile_and_apply_speakers(
+        self,
+        transcripts: List[str],
+        all_metadata: Dict[int, List[SpeakerMetadata]]
+    ) -> List[str]:
+        """
+        Reconcile speakers across chunks and apply consistent labels.
+        
+        Args:
+            transcripts: List of transcript texts
+            all_metadata: Dict mapping chunk index to speaker metadata
+            
+        Returns:
+            List of transcripts with consistent speaker labels
+        """
+        if not all_metadata:
+            print("  No speaker metadata found, skipping reconciliation")
+            return transcripts
+        
+        try:
+            # Get the speaker mapping from LLM
+            replacement_map = reconcile_speakers(all_metadata, self.provider)
+            
+            # Apply mapping to each transcript
+            reconciled = []
+            for i, transcript in enumerate(transcripts):
+                if i in replacement_map:
+                    mapped_transcript = apply_speaker_mapping(
+                        transcript, replacement_map[i]
+                    )
+                    reconciled.append(mapped_transcript)
+                else:
+                    reconciled.append(transcript)
+            
+            return reconciled
+            
+        except Exception as e:
+            print(f"  Warning: Speaker reconciliation failed: {e}")
+            print("  Falling back to original speaker labels")
+            return transcripts
     
     def _save_transcript(
         self,
