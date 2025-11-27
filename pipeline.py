@@ -225,6 +225,7 @@ class TranscriptionPipeline:
                         "label": s.label,
                         "voice_description": s.voice_description,
                         "role_estimation": s.role_estimation,
+                        "verbal_patterns": s.verbal_patterns,
                     }
                     for s in all_metadata[i]
                 ]
@@ -259,6 +260,7 @@ class TranscriptionPipeline:
                 "master_label": m.master_label,
                 "voice_description": m.voice_description,
                 "role_estimation": m.role_estimation,
+                "verbal_patterns": m.verbal_patterns,
                 "chunk_labels": m.chunk_labels,
             }
             for m in result.mappings

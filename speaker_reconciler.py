@@ -15,7 +15,8 @@ class SpeakerMetadata:
     label: str
     voice_description: str
     role_estimation: str
-    chunk_index: int
+    verbal_patterns: str = ""
+    chunk_index: int = 0
 
 
 @dataclass
@@ -24,6 +25,7 @@ class PersonMapping:
     master_label: str
     voice_description: str = ""
     role_estimation: str = ""
+    verbal_patterns: str = ""
     chunk_labels: List[Dict[str, Any]] = field(default_factory=list)
 
 
@@ -73,6 +75,7 @@ def extract_transcript_and_metadata(
                 label=item.get("label", "Unknown"),
                 voice_description=item.get("voice_description", ""),
                 role_estimation=item.get("role_estimation", ""),
+                verbal_patterns=item.get("verbal_patterns", ""),
                 chunk_index=chunk_index,
             ))
     
@@ -100,6 +103,7 @@ def build_reconciliation_input(
                 "label": s.label,
                 "voice_description": s.voice_description,
                 "role_estimation": s.role_estimation,
+                "verbal_patterns": s.verbal_patterns,
             }
             for s in speakers
         ]
@@ -146,6 +150,7 @@ def parse_reconciliation_response(
                 master_label=item["master_label"],
                 voice_description=item.get("voice_description", ""),
                 role_estimation=item.get("role_estimation", ""),
+                verbal_patterns=item.get("verbal_patterns", ""),
                 chunk_labels=item.get("chunk_labels", []),
             )
             mappings.append(mapping)
@@ -294,6 +299,7 @@ def reconcile_speakers(
                 master_label=s.label.replace("Speaker", "Person"),
                 voice_description=s.voice_description,
                 role_estimation=s.role_estimation,
+                verbal_patterns=s.verbal_patterns,
                 chunk_labels=[{"chunk": chunk_idx + 1, "label": s.label}]
             )
             for s in speakers
@@ -393,6 +399,7 @@ def build_speaker_debug_summary(
             "master_label": person.master_label,
             "final_voice_description": person.voice_description,
             "final_role_estimation": person.role_estimation,
+            "final_verbal_patterns": person.verbal_patterns,
             "chunk_descriptions": []
         }
         
@@ -410,6 +417,7 @@ def build_speaker_debug_summary(
                             "original_label": label,
                             "voice_description": speaker.voice_description,
                             "role_estimation": speaker.role_estimation,
+                            "verbal_patterns": speaker.verbal_patterns,
                         })
                         break
         
