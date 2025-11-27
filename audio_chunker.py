@@ -113,7 +113,36 @@ def chunk_audio(audio_path: str, output_dir: str = None) -> List[AudioChunk]:
     chunk_index = 0
     start_ms = 0
     
+    # Minimum duration for a trailing chunk (in ms) - skip tiny remnants
+    min_trailing_chunk_ms = 5000  # 5 seconds
+    
     while start_ms < total_duration_ms:
+        # Calculate remaining audio duration
+        remaining_ms = total_duration_ms - start_ms
+        
+        # Skip if the remaining audio is too short to be worth a separate chunk
+        # (This handles cases where audio is e.g. 13.001 minutes and we'd create a 0.1s chunk)
+        if chunk_index > 0 and remaining_ms < min_trailing_chunk_ms:
+            # Extend the previous chunk to include this tiny remainder
+            if chunks:
+                prev_chunk = chunks[-1]
+                # Re-export the previous chunk with the extended duration
+                extended_audio = audio[prev_chunk.start_time_ms:total_duration_ms]
+                extended_audio.export(prev_chunk.file_path, format="mp3")
+                # Update the chunk metadata
+                chunks[-1] = AudioChunk(
+                    index=prev_chunk.index,
+                    file_path=prev_chunk.file_path,
+                    start_time_ms=prev_chunk.start_time_ms,
+                    end_time_ms=total_duration_ms,
+                    duration_ms=total_duration_ms - prev_chunk.start_time_ms,
+                    has_overlap_before=prev_chunk.has_overlap_before,
+                    has_overlap_after=False,
+                    overlap_duration_ms=prev_chunk.overlap_duration_ms,
+                )
+                print(f"  Extended chunk {prev_chunk.index} to include {remaining_ms/1000:.1f}s remainder")
+            break
+        
         # Calculate end position
         end_ms = min(start_ms + chunk_duration_ms, total_duration_ms)
         
